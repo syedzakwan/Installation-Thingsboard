@@ -1,0 +1,171 @@
+#!/bin/bash
+
+function create_database()
+{
+
+	echo "Enter you postgres password below"
+	psql -U postgres -d postgres -h 127.0.0.1 -W -c "CREATE DATABASE thingsboard;" 
+}
+
+function handle_error()
+{
+	echo "Error installing Thingsboard"
+	#echo "Proceed to clean up. DO NOT EXIT THE SCRIPT"
+	#clean_up
+}
+
+function clean_up()
+{
+	sudo dpkg -r thingsboard
+	sudo apt-get --purge remove -y zookeeper libzookeeper-java
+	sudo rm -rf /usr/local/kafka
+	sudo apt-get --purge remove -y pgdg-keyring postgresql-12 postgresql-client-12 postgresql-client-common postgresql-common
+
+}		
+echo "Enter password for postgresql"
+read -s PASSWORD
+echo "Enter again:"
+read -s C_PASSWORD
+
+if [[ "$PASSWORD" == "$C_PASSWORD" ]];then
+	:
+else
+	echo "Password not same. Please try again"
+	exit 1
+fi
+
+#install java 8
+ls /usr/lib/jvm/java-1.8.0-openjdk-amd64/
+if [ $? -eq 0 ];then
+	:
+else
+	echo "...................Installing Java 8 (OpenJDK)..................."
+	sudo apt update 
+	sudo apt install openjdk-8-jdk
+	sudo update-alternatives --config java
+fi
+
+
+work_dir=~/install_thingsboard
+echo $work_dir
+#exit 1
+mkdir $work_dir 
+cd $work_dir
+#download and install thingsboard
+sudo wget https://github.com/thingsboard/thingsboard/releases/download/v2.5.3/thingsboard-2.5.3.deb 
+sudo dpkg -i thingsboard-2.5.3.deb
+
+#Configure ThingsBoard Database using PostgreSQL
+sudo touch postgresql_install
+echo '#!/bin/bash
+# install **wget** if not already installed:
+sudo apt install -y wget
+
+# import the repository signing key:
+wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+
+# add repository contents to your system:
+RELEASE=$(lsb_release -cs)
+echo "deb http://apt.postgresql.org/pub/repos/apt/ ${RELEASE}"-pgdg main | sudo tee  /etc/apt/sources.list.d/pgdg.list
+
+# install and launch the postgresql service:
+sudo apt update
+sudo apt -y install postgresql-12
+sudo service postgresql start' > postgresql_install
+sudo chmod +x postgresql_install
+sudo ./postgresql_install  
+sleep 5
+
+sudo service postgresql start
+pg_lsclusters
+sudo pg_ctlcluster 12 main start
+
+sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '$PASSWORD';"
+count=0
+while [ $count -lt 3 ]
+do
+	create_database
+	if [ $? -eq 0 ];then
+		break
+	fi
+	let "count=count+1"
+done
+
+#echo "Enter you postgres password below"
+#psql -U postgres -d postgres -h 127.0.0.1 -W -c "CREATE DATABASE thingsboard;" || echo "Please try again"
+#sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'pass1234'" -h 127.0.0.1 -W -c "CREATE DATABASE thingsboard;" 
+
+sudo echo "# DB Configuration 
+export DATABASE_ENTITIES_TYPE=sql
+export DATABASE_TS_TYPE=sql
+export SPRING_JPA_DATABASE_PLATFORM=org.hibernate.dialect.PostgreSQLDialect
+export SPRING_DRIVER_CLASS_NAME=org.postgresql.Driver
+export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/thingsboard
+export SPRING_DATASOURCE_USERNAME=postgres
+export SPRING_DATASOURCE_PASSWORD="$PASSWORD"
+export SPRING_DATASOURCE_MAXIMUM_POOL_SIZE=5
+# Specify partitioning size for timestamp key-value storage. Allowed values: DAYS, MONTHS, YEARS, INDEFINITE.
+export SQL_POSTGRES_TS_KV_PARTITIONING=MONTHS" >> /etc/thingsboard/conf/thingsboard.conf
+
+sudo systemctl daemon-reload
+#install zookeeper & kafka
+sudo apt-get -y install zookeeper
+sleep 1
+#wget http://www-us.apache.org/dist/kafka/2.3.0/kafka_2.12-2.3.0.tgz
+#tar xzf kafka_2.12-2.3.0.tgz
+wget https://downloads.apache.org/kafka/2.7.0/kafka_2.12-2.7.0.tgz
+tar xzf kafka_2.12-2.7.0.tgz
+sudo mv kafka_2.12-2.7.0 /usr/local/kafka
+
+#Setup ZooKeeper Systemd Unit file
+sudo touch /etc/systemd/system/zookeeper.service
+sudo echo "[Unit]
+Description=Apache Zookeeper server
+Documentation=http://zookeeper.apache.org
+Requires=network.target remote-fs.target
+After=network.target remote-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/kafka/bin/zookeeper-server-start.sh /usr/local/kafka/config/zookeeper.properties
+ExecStop=/usr/local/kafka/bin/zookeeper-server-stop.sh
+Restart=on-abnormal
+
+[Install]
+WantedBy=multi-user.target" | tee  /etc/systemd/system/zookeeper.service
+
+#Setup Kafka Systemd Unit file
+sudo touch /etc/systemd/system/kafka.service
+sudo echo "[Unit]
+Description=Apache Kafka Server
+Documentation=http://kafka.apache.org/documentation.html
+Requires=zookeeper.service
+
+[Service]
+Type=simple
+Environment="JAVA_HOME=/usr/lib/jvm/java-1.8.0-openjdk-amd64"
+ExecStart=/usr/local/kafka/bin/kafka-server-start.sh /usr/local/kafka/config/server.properties
+ExecStop=/usr/local/kafka/bin/kafka-server-stop.sh
+
+[Install]
+WantedBy=multi-user.target" | tee  /etc/systemd/system/kafka.service
+
+sudo systemctl daemon-reload
+sudo systemctl start zookeeper
+sudo systemctl start kafka
+
+sudo echo "export TB_QUEUE_TYPE=kafka
+export TB_KAFKA_SERVERS=localhost:9092" >> /etc/thingsboard/conf/thingsboard.conf
+
+#changing thingsboard server port
+sudo sed -i 's/MQTT_BIND_PORT:1883/MQTT_BIND_PORT:2883/g' /etc/thingsboard/conf/thingsboard.yml 
+
+# --loadDemo option will load demo data: users, devices, assets, rules, widgets.
+sudo /usr/share/thingsboard/bin/install/install.sh --loadDemo
+
+sudo systemctl start thingsboard
+sleep 10
+ip_address=$(hostname -I | awk 'NR==1 {print $1}')
+echo ".............Installation Succesfull............"
+echo "Plase open this link to see the Thingsboard portal, http://$ip_address:8080/login"
+
