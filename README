@@ -1,0 +1,7 @@
+This is a script to install Thingsboard CE on Ubuntu Server
+Thingsboard Version: 2.5
+Thingsboard Database: PostgresSQL 12
+Thingsboard queue service: Kafka 2.7
+
+
+Reference:https://thingsboard.io/docs/user-guide/install/ubuntu/
